@@ -1,12 +1,21 @@
-import { chromium } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 import { supabase } from "./supabase.js";
 import { searchShortsIds, scrapeVideoMetadata, scrapeComments } from "./youtube.js";
+import { PLATFORM_CONFIG } from "./resilience/config.js";
+import { RateLimiter, jitterDelay } from "./resilience/rateLimiter.js";
+import { CircuitBreaker } from "./resilience/circuitBreaker.js";
+import { withRetry, PlatformBlockedError } from "./resilience/retry.js";
+import { logEvent, RunStats } from "./resilience/logger.js";
+import { launchBrowser, newStealthContext } from "./resilience/browser.js";
+import { loadProxyPoolFromEnv } from "./resilience/proxyPool.js";
+
+const PLATFORM = "youtube_shorts" as const;
+const config = PLATFORM_CONFIG[PLATFORM];
 
 const MIN_VIEWS = 100_000;
 const MAX_SHORT_DURATION_SECONDS = 60;
 const RESULTS_PER_KEYWORD = 25;
 const COMMENTS_PER_VIDEO = 20;
-const NAV_DELAY_MS = 1_500; // stay polite with youtube.com, avoid tripping rate limits
 
 const SEARCH_KEYWORDS = [
   "saas tips",
@@ -19,108 +28,163 @@ const SEARCH_KEYWORDS = [
   "saas founder",
 ];
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function main() {
-  const browser = await chromium.launch();
-  const context = await browser.newContext({ userAgent: USER_AGENT });
-  const page = await context.newPage();
+  await logEvent(PLATFORM, "info", "Run started");
+
+  const rateLimiter = new RateLimiter(config.maxRequestsPerHour);
+  const breaker = new CircuitBreaker(config.circuitBreakerThreshold);
+  const stats = new RunStats();
+  const proxyPool = loadProxyPoolFromEnv();
+
+  const browser: Browser = await launchBrowser();
+  let context: BrowserContext = await newStealthContext(browser, proxyPool.current());
+  let page: Page = await context.newPage();
+
+  // Resilience layer wrapped around the existing scraping functions: rate
+  // limit + jitter before every action, retry with backoff on transient
+  // errors, pause (not retry) on a detected block, and trip the circuit
+  // breaker after too many consecutive failures. Nothing in youtube.ts's
+  // extraction logic changes — this only guards how/when it gets called.
+  async function guarded<T>(label: string, fn: (page: Page) => Promise<T>): Promise<T | null> {
+    if (breaker.isOpen()) return null;
+
+    await rateLimiter.waitForSlot();
+    await jitterDelay(config.minDelayMs, config.maxDelayMs);
+    proxyPool.noteRequest();
+
+    try {
+      const result = await withRetry(() => fn(page), {
+        retryDelaysMs: config.retryDelaysMs,
+        onAttemptFailed: (err, attempt) => {
+          void logEvent(PLATFORM, "error", `${label} attempt ${attempt + 1} failed: ${errorMessage(err)}`);
+        },
+      });
+      stats.recordSuccess();
+      breaker.recordSuccess();
+      return result;
+    } catch (err) {
+      if (err instanceof PlatformBlockedError) {
+        stats.recordBlocked();
+        breaker.pauseFor(config.blockCooldownMs);
+        await logEvent(
+          PLATFORM,
+          "blocked",
+          `${label}: ${errorMessage(err)} — pausing ${PLATFORM} for ${Math.round(config.blockCooldownMs / 60_000)}min`,
+        );
+
+        // A block is exactly when rotating (if we can) earns its keep most.
+        if (proxyPool.enabled) {
+          proxyPool.rotate();
+          await context.close();
+          context = await newStealthContext(browser, proxyPool.current());
+          page = await context.newPage();
+        }
+        return null;
+      }
+
+      stats.recordFailure();
+      const tripped = breaker.recordFailure();
+      await logEvent(PLATFORM, "error", `${label} failed after retries: ${errorMessage(err)}`);
+      if (tripped) {
+        await logEvent(
+          PLATFORM,
+          "circuit_open",
+          `${config.circuitBreakerThreshold} consecutive failures — disabling ${PLATFORM} for the rest of this run`,
+        );
+      }
+      return null;
+    }
+  }
 
   const videoIdSet = new Set<string>();
   for (const keyword of SEARCH_KEYWORDS) {
-    try {
-      const ids = await searchShortsIds(page, keyword, RESULTS_PER_KEYWORD);
-      for (const id of ids) videoIdSet.add(id);
-    } catch (err) {
-      console.error(`search failed for "${keyword}":`, err);
-    }
-    await sleep(NAV_DELAY_MS);
+    if (breaker.isOpen()) break;
+    const ids = await guarded(`search:${keyword}`, (p) => searchShortsIds(p, keyword, RESULTS_PER_KEYWORD));
+    for (const id of ids ?? []) videoIdSet.add(id);
   }
   console.log(`Found ${videoIdSet.size} candidate Shorts across ${SEARCH_KEYWORDS.length} keywords.`);
 
-  const qualifying = [];
-  for (const videoId of videoIdSet) {
-    try {
-      const meta = await scrapeVideoMetadata(page, videoId);
-      if (meta && meta.viewCount >= MIN_VIEWS && meta.lengthSeconds <= MAX_SHORT_DURATION_SECONDS) {
-        qualifying.push(meta);
-      }
-    } catch (err) {
-      console.error(`metadata scrape failed for ${videoId}:`, err);
-    }
-    await sleep(NAV_DELAY_MS);
-  }
-  console.log(`${qualifying.length} qualify with >=${MIN_VIEWS} views and <=${MAX_SHORT_DURATION_SECONDS}s duration.`);
-
-  if (qualifying.length === 0) {
-    await browser.close();
-    return;
+  const candidateIds = [...videoIdSet].slice(0, config.maxVideosPerRun);
+  if (candidateIds.length < videoIdSet.size) {
+    await logEvent(
+      PLATFORM,
+      "info",
+      `Capping this run to ${candidateIds.length}/${videoIdSet.size} candidates (maxVideosPerRun=${config.maxVideosPerRun})`,
+    );
   }
 
-  const candidateUrls = qualifying.map((v) => `https://www.youtube.com/shorts/${v.videoId}`);
+  const candidateUrls = candidateIds.map((id) => `https://www.youtube.com/shorts/${id}`);
   const { data: existingRows } = await supabase.from("viral_videos").select("video_url").in("video_url", candidateUrls);
   const existingUrls = new Set((existingRows ?? []).map((r) => r.video_url));
 
-  const rows = qualifying.map((video) => ({
-    platform: "youtube_shorts",
-    video_url: `https://www.youtube.com/shorts/${video.videoId}`,
-    account_name: video.channelName,
-    account_handle: video.channelHandle,
-    views_count: video.viewCount,
-    likes_count: video.likesCount,
-    comments_count: null,
-    saves_count: null,
-    published_at: video.publishedAt,
-  }));
-
-  const { data: upserted, error } = await supabase
-    .from("viral_videos")
-    .upsert(rows, { onConflict: "video_url" })
-    .select("id, video_url");
-
-  if (error) {
-    console.error("Upsert into viral_videos failed:", error);
-    await browser.close();
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`Upserted ${upserted?.length ?? 0} videos.`);
-
-  // Only pull comments for videos we hadn't already collected, to avoid
-  // re-inserting duplicate comment samples on every scheduled run.
-  const newlyInserted = (upserted ?? []).filter((v) => !existingUrls.has(v.video_url));
+  let upsertedCount = 0;
   let commentsInserted = 0;
 
-  for (const video of newlyInserted) {
-    const videoId = video.video_url.split("/shorts/")[1];
-    try {
-      const comments = await scrapeComments(page, videoId, COMMENTS_PER_VIDEO);
-      if (comments.length > 0) {
-        const { error: commentsError } = await supabase
-          .from("viral_video_comments")
-          .insert(comments.map((c) => ({ video_id: video.id, comment_text: c.text, author: c.author })));
-        if (commentsError) {
-          console.error(`Insert comments failed for ${video.video_url}:`, commentsError);
-        } else {
-          commentsInserted += comments.length;
-        }
-      }
-    } catch (err) {
-      console.error(`comment scrape failed for ${video.video_url}:`, err);
-    }
-    await sleep(NAV_DELAY_MS);
-  }
-  console.log(`Inserted ${commentsInserted} sampled comments.`);
+  for (const videoId of candidateIds) {
+    if (breaker.isOpen()) break;
 
+    const meta = await guarded(`metadata:${videoId}`, (p) => scrapeVideoMetadata(p, videoId));
+    if (!meta) continue;
+    if (meta.viewCount < MIN_VIEWS || meta.lengthSeconds > MAX_SHORT_DURATION_SECONDS) continue;
+
+    const videoUrl = `https://www.youtube.com/shorts/${videoId}`;
+    const row = {
+      platform: PLATFORM,
+      video_url: videoUrl,
+      account_name: meta.channelName,
+      account_handle: meta.channelHandle,
+      views_count: meta.viewCount,
+      likes_count: meta.likesCount,
+      comments_count: null,
+      saves_count: null,
+      published_at: meta.publishedAt,
+    };
+
+    // Upsert immediately, one video at a time, rather than batching results
+    // in memory — a crash mid-run then loses at most the video in flight,
+    // not everything scraped so far.
+    const { data: upserted, error } = await supabase
+      .from("viral_videos")
+      .upsert(row, { onConflict: "video_url" })
+      .select("id, video_url")
+      .single();
+
+    if (error) {
+      await logEvent(PLATFORM, "error", `Upsert failed for ${videoUrl}: ${error.message}`);
+      continue;
+    }
+    upsertedCount += 1;
+
+    if (existingUrls.has(videoUrl)) continue; // already had this one from a prior run — comments already sampled
+
+    const comments = await guarded(`comments:${videoId}`, (p) => scrapeComments(p, videoId, COMMENTS_PER_VIDEO));
+    if (!comments || comments.length === 0) continue;
+
+    const { error: commentsError } = await supabase
+      .from("viral_video_comments")
+      .insert(comments.map((c) => ({ video_id: upserted.id, comment_text: c.text, author: c.author })));
+
+    if (commentsError) {
+      await logEvent(PLATFORM, "error", `Insert comments failed for ${videoUrl}: ${commentsError.message}`);
+      continue;
+    }
+    commentsInserted += comments.length;
+  }
+
+  await logEvent(
+    PLATFORM,
+    "summary",
+    `Upserted ${upsertedCount} videos, inserted ${commentsInserted} comments. ${stats.summary()}`,
+  );
   await browser.close();
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
+  await logEvent(PLATFORM, "error", `Run crashed: ${errorMessage(err)}`);
   process.exitCode = 1;
 });

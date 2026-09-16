@@ -1,4 +1,6 @@
 import type { Page } from "playwright";
+import { isBlockedPage, isBlockedResponse } from "./resilience/blockDetection.js";
+import { PlatformBlockedError } from "./resilience/retry.js";
 
 export interface ScrapedVideo {
   videoId: string;
@@ -38,7 +40,10 @@ function collectVideoIds(node: unknown, out: Set<string>): void {
 export async function searchShortsIds(page: Page, keyword: string, limit: number): Promise<string[]> {
   // sp=EgIYAQ%3D%3D is YouTube's "Duration: Short (< 4 minutes)" search filter.
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}&sp=EgIYAQ%3D%3D`;
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  if (isBlockedResponse(response) || (await isBlockedPage(page))) {
+    throw new PlatformBlockedError(`Blocked while searching "${keyword}"`);
+  }
 
   const data = await page.evaluate(() => (window as unknown as { ytInitialData?: unknown }).ytInitialData);
   if (!data) return [];
@@ -54,10 +59,13 @@ export async function searchShortsIds(page: Page, keyword: string, limit: number
 // including the channel's @handle via ownerProfileUrl — so we scrape that
 // URL for every Short instead.
 export async function scrapeVideoMetadata(page: Page, videoId: string): Promise<ScrapedVideo | null> {
-  await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
+  const response = await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
+  if (isBlockedResponse(response) || (await isBlockedPage(page))) {
+    throw new PlatformBlockedError(`Blocked while scraping metadata for ${videoId}`);
+  }
 
   const data = await page.evaluate(() => {
     const pr = (window as unknown as { ytInitialPlayerResponse?: any }).ytInitialPlayerResponse;
@@ -88,10 +96,13 @@ async function triggerLazyLoad(page: Page, steps: number): Promise<void> {
 }
 
 export async function scrapeComments(page: Page, videoId: string, limit: number): Promise<ScrapedComment[]> {
-  await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
+  const response = await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
     waitUntil: "load",
     timeout: 30_000,
   });
+  if (isBlockedResponse(response) || (await isBlockedPage(page))) {
+    throw new PlatformBlockedError(`Blocked while scraping comments for ${videoId}`);
+  }
   await page.waitForTimeout(1_500);
 
   // The comments section is a hidden, not-yet-upgraded custom element until
