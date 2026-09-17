@@ -14,6 +14,9 @@ export interface ViralVideo {
   collected_at: string
   saas_mentioned: string | null
   saas_link_in_comments: boolean
+  is_qualified: boolean
+  engagement_suspect: boolean
+  saas_relevance_score: number | null
 }
 
 export interface ViralVideoComment {

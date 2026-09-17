@@ -8,11 +8,11 @@ import { withRetry, PlatformBlockedError } from "./resilience/retry.js";
 import { logEvent, RunStats } from "./resilience/logger.js";
 import { launchBrowser, newStealthContext } from "./resilience/browser.js";
 import { loadProxyPoolFromEnv } from "./resilience/proxyPool.js";
+import { qualifyVideo } from "./resilience/qualification.js";
 
 const PLATFORM = "youtube_shorts" as const;
 const config = PLATFORM_CONFIG[PLATFORM];
 
-const MIN_VIEWS = 100_000;
 const MAX_SHORT_DURATION_SECONDS = 60;
 const RESULTS_PER_KEYWORD = 25;
 const COMMENTS_PER_VIDEO = 20;
@@ -129,9 +129,36 @@ async function main() {
 
     const meta = await guarded(`metadata:${videoId}`, (p) => scrapeVideoMetadata(p, videoId));
     if (!meta) continue;
-    if (meta.viewCount < MIN_VIEWS || meta.lengthSeconds > MAX_SHORT_DURATION_SECONDS) continue;
+    if (meta.lengthSeconds > MAX_SHORT_DURATION_SECONDS) continue; // not actually a Short, unrelated to qualification
 
     const videoUrl = `https://www.youtube.com/shorts/${videoId}`;
+    const qualification = qualifyVideo({
+      viewsCount: meta.viewCount,
+      likesCount: meta.likesCount,
+      commentsCount: null, // not tracked for YouTube — only the comment sample is, separately
+      text: [meta.title, meta.description].filter(Boolean).join(" "),
+    });
+
+    if (!qualification.passesHardGate) {
+      const { error: rejectError } = await supabase.from("rejected_videos").upsert(
+        {
+          platform: PLATFORM,
+          video_url: videoUrl,
+          account_name: meta.channelName,
+          account_handle: meta.channelHandle,
+          views_count: meta.viewCount,
+          likes_count: meta.likesCount,
+          comments_count: null,
+          rejection_reason: qualification.rejectionReason,
+        },
+        { onConflict: "video_url" },
+      );
+      if (rejectError) {
+        await logEvent(PLATFORM, "error", `Rejected-video upsert failed for ${videoUrl}: ${rejectError.message}`);
+      }
+      continue;
+    }
+
     const row = {
       platform: PLATFORM,
       video_url: videoUrl,
@@ -142,6 +169,9 @@ async function main() {
       comments_count: null,
       saves_count: null,
       published_at: meta.publishedAt,
+      is_qualified: qualification.isQualified,
+      engagement_suspect: qualification.engagementSuspect,
+      saas_relevance_score: qualification.saasRelevanceScore,
     };
 
     // Upsert immediately, one video at a time, rather than batching results

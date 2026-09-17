@@ -11,6 +11,8 @@ export interface ScrapedVideo {
   likesCount: number | null;
   publishedAt: string | null;
   lengthSeconds: number;
+  title: string | null;
+  description: string | null;
 }
 
 export interface ScrapedComment {
@@ -85,6 +87,8 @@ export async function scrapeVideoMetadata(page: Page, videoId: string): Promise<
     likesCount: data.likeCount != null ? Number(data.likeCount) : null,
     publishedAt: data.publishDate ?? null,
     lengthSeconds: Number(data.lengthSeconds ?? Infinity),
+    title: data.title?.simpleText ?? null,
+    description: data.description?.simpleText ?? null,
   };
 }
 

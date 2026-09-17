@@ -12,6 +12,7 @@ export interface ScrapedTiktokVideo {
   savesCount: number | null;
   publishedAt: string | null;
   lengthSeconds: number;
+  description: string | null;
 }
 
 // TikTok's /search and /tag/<hashtag> pages hard-block unauthenticated
@@ -84,5 +85,6 @@ export async function scrapeVideoMetadata(page: Page, handle: string, videoId: s
     savesCount: item.stats?.collectCount != null ? Number(item.stats.collectCount) : null,
     publishedAt: createTimeSeconds > 0 ? new Date(createTimeSeconds * 1000).toISOString() : null,
     lengthSeconds: Number(item.video?.duration ?? Infinity),
+    description: typeof item.desc === "string" ? item.desc : null,
   };
 }

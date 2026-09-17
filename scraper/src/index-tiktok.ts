@@ -9,11 +9,11 @@ import { withRetry, PlatformBlockedError } from "./resilience/retry.js";
 import { logEvent, RunStats } from "./resilience/logger.js";
 import { launchBrowser, newStealthContext } from "./resilience/browser.js";
 import { loadProxyPoolFromEnv } from "./resilience/proxyPool.js";
+import { qualifyVideo } from "./resilience/qualification.js";
 
 const PLATFORM = "tiktok" as const;
 const config = PLATFORM_CONFIG[PLATFORM];
 
-const MIN_VIEWS = 100_000;
 const VIDEOS_PER_ACCOUNT = 20;
 
 function errorMessage(err: unknown): string {
@@ -112,9 +112,35 @@ async function main() {
 
     const meta = await guarded(`metadata:${videoId}`, (p) => scrapeVideoMetadata(p, handle, videoId));
     if (!meta) continue;
-    if (meta.viewCount < MIN_VIEWS) continue;
 
     const videoUrl = `https://www.tiktok.com/@${handle}/video/${videoId}`;
+    const qualification = qualifyVideo({
+      viewsCount: meta.viewCount,
+      likesCount: meta.likesCount,
+      commentsCount: meta.commentsCount,
+      text: meta.description ?? "",
+    });
+
+    if (!qualification.passesHardGate) {
+      const { error: rejectError } = await supabase.from("rejected_videos").upsert(
+        {
+          platform: PLATFORM,
+          video_url: videoUrl,
+          account_name: meta.channelName,
+          account_handle: meta.channelHandle,
+          views_count: meta.viewCount,
+          likes_count: meta.likesCount,
+          comments_count: meta.commentsCount,
+          rejection_reason: qualification.rejectionReason,
+        },
+        { onConflict: "video_url" },
+      );
+      if (rejectError) {
+        await logEvent(PLATFORM, "error", `Rejected-video upsert failed for ${videoUrl}: ${rejectError.message}`);
+      }
+      continue;
+    }
+
     const row = {
       platform: PLATFORM,
       video_url: videoUrl,
@@ -125,6 +151,9 @@ async function main() {
       comments_count: meta.commentsCount,
       saves_count: meta.savesCount,
       published_at: meta.publishedAt,
+      is_qualified: qualification.isQualified,
+      engagement_suspect: qualification.engagementSuspect,
+      saas_relevance_score: qualification.saasRelevanceScore,
     };
 
     // Immediate per-video upsert — a crash mid-run loses at most the video

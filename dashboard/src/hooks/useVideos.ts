@@ -42,9 +42,13 @@ export function useVideos(filters: VideoFilters) {
         }
       }
 
+      // Only fully-qualified videos (views/likes threshold + SaaS-relevance
+      // score) surface here — see rejected_videos and is_qualified=false rows
+      // for the ones held back pending a manual/threshold review.
       let query = supabase
         .from('viral_videos')
         .select('*')
+        .eq('is_qualified', true)
         .order(filters.sortField, { ascending: filters.sortDirection === 'asc' })
 
       if (filters.platform !== 'all') {
