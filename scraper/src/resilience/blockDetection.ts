@@ -10,6 +10,9 @@ const BLOCK_MARKERS = [
   "please verify you are a human",
   "verify you are human",
   "/sorry/index",
+  // TikTok's exact wording on its bot wall (verified live on /search and /tag/*).
+  "sorry, something wrong with the server",
+  "sorry about that! please try again later",
 ];
 
 export function isBlockedResponse(response: Response | null): boolean {

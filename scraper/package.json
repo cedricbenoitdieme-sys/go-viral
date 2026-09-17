@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "scrape": "tsx src/index.ts",
+    "scrape:tiktok": "tsx src/index-tiktok.ts",
     "install-browsers": "playwright install --with-deps chromium"
   },
   "dependencies": {
