@@ -39,9 +39,20 @@ function collectVideoIds(node: unknown, out: Set<string>): void {
   }
 }
 
-export async function searchShortsIds(page: Page, keyword: string, limit: number): Promise<string[]> {
-  // sp=EgIYAQ%3D%3D is YouTube's "Duration: Short (< 4 minutes)" search filter.
-  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}&sp=EgIYAQ%3D%3D`;
+// YouTube's `sp` search-filter param is a base64 protobuf. Both values below
+// include "Duration: Short (< 4 minutes)"; the second additionally sorts by
+// upload date and restricts to uploads from the current year.
+export const SEARCH_FILTER_SHORTS = "EgIYAQ%3D%3D";
+export const SEARCH_FILTER_SHORTS_NEWEST_THIS_YEAR = "CAISBggFEAEYAQ%3D%3D";
+
+export async function searchShortsIds(
+  page: Page,
+  keyword: string,
+  limit: number,
+  filter: string = SEARCH_FILTER_SHORTS,
+): Promise<string[]> {
+  // hl=en&gl=US pins results to the US market regardless of where the scraper runs.
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}&sp=${filter}&hl=en&gl=US`;
   const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
   if (isBlockedResponse(response) || (await isBlockedPage(page))) {
     throw new PlatformBlockedError(`Blocked while searching "${keyword}"`);

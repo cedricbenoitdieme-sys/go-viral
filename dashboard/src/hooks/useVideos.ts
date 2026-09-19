@@ -49,6 +49,7 @@ export function useVideos(filters: VideoFilters) {
         .from('viral_videos')
         .select('*')
         .eq('is_qualified', true)
+        .eq('category', filters.category)
         .order(filters.sortField, { ascending: filters.sortDirection === 'asc' })
 
       if (filters.platform !== 'all') {
@@ -73,7 +74,7 @@ export function useVideos(filters: VideoFilters) {
     return () => {
       cancelled = true
     }
-  }, [filters.platform, filters.asksAboutSaas, filters.sortField, filters.sortDirection])
+  }, [filters.category, filters.platform, filters.asksAboutSaas, filters.sortField, filters.sortDirection])
 
   return { videos, loading, error }
 }

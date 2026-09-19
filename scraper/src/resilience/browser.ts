@@ -22,7 +22,8 @@ const VIEWPORTS = [
   { width: 1280, height: 800 },
 ];
 
-const LOCALES = ["en-US", "fr-FR", "en-GB"];
+// US market focus: always present as a US English browser.
+const LOCALES = ["en-US"];
 
 function pickRandom<T>(items: T[]): T {
   return items[Math.floor(Math.random() * items.length)];

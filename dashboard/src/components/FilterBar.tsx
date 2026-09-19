@@ -14,6 +14,7 @@ interface FilterBarProps {
 const SORT_OPTIONS: { field: SortField; label: string }[] = [
   { field: 'views_count', label: 'Vues' },
   { field: 'collected_at', label: 'Récence' },
+  { field: 'published_at', label: 'Publication' },
 ]
 
 export function FilterBar({

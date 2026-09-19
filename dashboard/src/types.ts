@@ -1,5 +1,14 @@
 export type Platform = 'youtube_shorts' | 'tiktok' | 'instagram' | 'twitter'
 
+export type Category = 'saas_marketing' | 'ai_dev_tips'
+
+export const CATEGORIES: Category[] = ['saas_marketing', 'ai_dev_tips']
+
+export const CATEGORY_LABELS: Record<Category, string> = {
+  saas_marketing: 'SaaS Marketing',
+  ai_dev_tips: 'AI Dev Tips',
+}
+
 export interface ViralVideo {
   id: string
   platform: Platform
@@ -17,6 +26,8 @@ export interface ViralVideo {
   is_qualified: boolean
   engagement_suspect: boolean
   saas_relevance_score: number | null
+  ai_dev_relevance_score: number | null
+  category: Category | null
 }
 
 export interface ViralVideoComment {
@@ -36,10 +47,11 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   twitter: 'Twitter/X',
 }
 
-export type SortField = 'views_count' | 'collected_at'
+export type SortField = 'views_count' | 'collected_at' | 'published_at'
 export type SortDirection = 'asc' | 'desc'
 
 export interface VideoFilters {
+  category: Category
   platform: Platform | 'all'
   asksAboutSaas: boolean
   sortField: SortField

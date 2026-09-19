@@ -114,7 +114,11 @@ async function main() {
     if (!meta) continue;
 
     const videoUrl = `https://www.tiktok.com/@${handle}/video/${videoId}`;
+    // Seed accounts are SaaS/business creators, so TikTok feeds saas_marketing
+    // only; the ai_dev_tips category is YouTube-only until AI-dev seeds exist.
     const qualification = qualifyVideo({
+      category: "saas_marketing",
+      publishedAt: meta.publishedAt,
       viewsCount: meta.viewCount,
       likesCount: meta.likesCount,
       commentsCount: meta.commentsCount,
@@ -131,6 +135,7 @@ async function main() {
           views_count: meta.viewCount,
           likes_count: meta.likesCount,
           comments_count: meta.commentsCount,
+          category: "saas_marketing",
           rejection_reason: qualification.rejectionReason,
         },
         { onConflict: "video_url" },
@@ -151,9 +156,11 @@ async function main() {
       comments_count: meta.commentsCount,
       saves_count: meta.savesCount,
       published_at: meta.publishedAt,
+      category: "saas_marketing",
       is_qualified: qualification.isQualified,
       engagement_suspect: qualification.engagementSuspect,
       saas_relevance_score: qualification.saasRelevanceScore,
+      ai_dev_relevance_score: qualification.aiDevRelevanceScore,
     };
 
     // Immediate per-video upsert — a crash mid-run loses at most the video
