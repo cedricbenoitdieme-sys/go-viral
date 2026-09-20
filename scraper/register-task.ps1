@@ -19,6 +19,8 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
 
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
+  -WakeToRun `
+  -RunOnlyIfNetworkAvailable `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -MultipleInstances IgnoreNew `

@@ -9,6 +9,7 @@ import { withRetry, PlatformBlockedError } from "./resilience/retry.js";
 import { logEvent, RunStats } from "./resilience/logger.js";
 import { launchBrowser, newStealthContext } from "./resilience/browser.js";
 import { loadProxyPoolFromEnv } from "./resilience/proxyPool.js";
+import { waitForNetwork } from "./resilience/network.js";
 import { qualifyVideo } from "./resilience/qualification.js";
 
 const PLATFORM = "tiktok" as const;
@@ -43,7 +44,10 @@ async function main() {
     proxyPool.noteRequest();
 
     try {
-      const result = await withRetry(() => fn(page), {
+      const result = await withRetry(async () => {
+        await waitForNetwork(); // an outage must not consume retry attempts
+        return fn(page);
+      }, {
         retryDelaysMs: config.retryDelaysMs,
         onAttemptFailed: (err, attempt) => {
           void logEvent(PLATFORM, "error", `${label} attempt ${attempt + 1} failed: ${errorMessage(err)}`);
